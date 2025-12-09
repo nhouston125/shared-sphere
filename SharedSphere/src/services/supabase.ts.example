@@ -1,0 +1,637 @@
+import { createClient, SupabaseClient, User, Session, AuthError } from '@supabase/supabase-js';
+
+const SUPABASE_URL = 'URL';
+const SUPABASE_ANON_KEY = 'KEY';
+
+export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Type definitions
+export interface UserProfile {
+  id: string;
+  username: string;
+  email: string;
+  preferred_payment_method?: string;
+  payment_username?: string;
+  created_at: string;
+}
+
+export interface Sphere {
+  id: string;
+  name: string;
+  type: 'friends' | 'roommates';
+  created_at: string;
+}
+
+export interface SphereMember {
+  id: string;
+  sphere_id: string;
+  user_id: string;
+  role: 'admin' | 'member';
+  joined_at: string;
+}
+
+export interface Receipt {
+  id: string;
+  uploaded_by: string;
+  sphere_id?: string;
+  image_url?: string;
+  total_amount: number;
+  tax: number;
+  tip: number;
+  scan_date: string;
+  status: 'pending' | 'completed' | 'disputed';
+}
+
+export interface ReceiptItem {
+  id: string;
+  receipt_id: string;
+  description: string;
+  price: number;
+  created_at: string;
+}
+
+export interface ItemSplit {
+  id: string;
+  item_id: string;
+  user_id: string;
+  percentage: number;
+  amount_owed: number;
+  status: 'pending' | 'disputed' | 'paid';
+  created_at: string;
+}
+
+// Response type helper
+interface ServiceResponse<T> {
+  data: T | null;
+  error: AuthError | Error | null;
+}
+
+// Helper functions for authentication
+export const authService = {
+  // Sign up new user
+  signUp: async (
+    email: string, 
+    password: string, 
+    username: string
+  ): Promise<ServiceResponse<{ user: User | null; session: Session | null }>> => {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          username: username,
+        },
+      },
+    });
+    return { data, error };
+  },
+
+  // Sign in existing user
+  signIn: async (
+    email: string, 
+    password: string
+  ): Promise<ServiceResponse<{ user: User | null; session: Session | null }>> => {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    return { data, error };
+  },
+
+  // Sign out
+  signOut: async (): Promise<{ error: AuthError | null }> => {
+    const { error } = await supabase.auth.signOut();
+    return { error };
+  },
+
+  // Get current user
+  getCurrentUser: async (): Promise<User | null> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    return user;
+  },
+
+  // Get current session
+  getSession: async (): Promise<Session | null> => {
+    const { data: { session } } = await supabase.auth.getSession();
+    return session;
+  },
+
+  // Listen to auth changes
+  onAuthStateChange: (callback: (event: string, session: Session | null) => void) => {
+    return supabase.auth.onAuthStateChange(callback);
+  },
+};
+
+// Helper functions for database operations
+export const dbService = {
+  // User operations
+  getUserProfile: async (userId: string): Promise<ServiceResponse<UserProfile>> => {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', userId)
+      .single();
+    return { data, error };
+  },
+
+  updateUserProfile: async (
+    userId: string, 
+    updates: Partial<UserProfile>
+  ): Promise<ServiceResponse<UserProfile[]>> => {
+    const { data, error } = await supabase
+      .from('users')
+      .update(updates)
+      .eq('id', userId)
+      .select();
+    return { data, error };
+  },
+
+  // Sphere operations
+  getUserSpheres: async (userId: string): Promise<ServiceResponse<any[]>> => {
+    const { data, error } = await supabase
+      .from('sphere_members')
+      .select(`
+        *,
+        spheres (*)
+      `)
+      .eq('user_id', userId);
+    return { data, error };
+  },
+
+  createSphere: async (
+    name: string, 
+    type: 'friends' | 'roommates', 
+    creatorId: string
+  ): Promise<ServiceResponse<Sphere>> => {
+    // Create sphere
+    const { data: sphere, error: sphereError } = await supabase
+      .from('spheres')
+      .insert({ name, type })
+      .select()
+      .single();
+
+    if (sphereError) return { data: null, error: sphereError };
+
+    // Add creator as member
+    const { error: memberError } = await supabase
+      .from('sphere_members')
+      .insert({
+        sphere_id: sphere.id,
+        user_id: creatorId,
+        role: 'admin',
+      });
+
+    if (memberError) return { data: null, error: memberError };
+
+    return { data: sphere, error: null };
+  },
+
+  // Receipt operations
+  createReceipt: async (
+    receiptData: Omit<Receipt, 'id' | 'scan_date'>
+  ): Promise<ServiceResponse<Receipt>> => {
+    const { data, error } = await supabase
+      .from('receipts')
+      .insert(receiptData)
+      .select()
+      .single();
+    return { data, error };
+  },
+
+  getUserReceipts: async (userId: string): Promise<ServiceResponse<Receipt[]>> => {
+    const { data, error } = await supabase
+      .from('receipts')
+      .select('*')
+      .eq('uploaded_by', userId)
+      .order('scan_date', { ascending: false });
+    return { data, error };
+  },
+
+  // Item operations
+  createReceiptItems: async (
+    items: Omit<ReceiptItem, 'id' | 'created_at'>[]
+  ): Promise<ServiceResponse<ReceiptItem[]>> => {
+    const { data, error } = await supabase
+      .from('receipt_items')
+      .insert(items)
+      .select();
+    return { data, error };
+  },
+
+  createItemSplits: async (
+    splits: Omit<ItemSplit, 'id' | 'created_at'>[]
+  ): Promise<ServiceResponse<ItemSplit[]>> => {
+    const { data, error } = await supabase
+      .from('item_splits')
+      .insert(splits)
+      .select();
+    return { data, error };
+  },
+
+  // Get all splits for a user
+  getUserSplits: async (userId: string): Promise<ServiceResponse<ItemSplit[]>> => {
+    const { data, error } = await supabase
+      .from('item_splits')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('status', 'pending');
+    return { data, error };
+  },
+
+  // Balance calculation methods
+  getBalances: async (userId: string): Promise<ServiceResponse<any>> => {
+    // Get all receipts uploaded by user
+    const { data: receipts, error: receiptsError } = await supabase
+      .from('receipts')
+      .select(`
+        id,
+        uploaded_by,
+        total_amount,
+        tax,
+        tip,
+        status,
+        scan_date,
+        receipt_items (
+          id,
+          description,
+          price,
+          item_splits (
+            id,
+            user_id,
+            percentage,
+            amount_owed,
+            status
+          )
+        )
+      `)
+      .eq('uploaded_by', userId)
+      .order('scan_date', { ascending: false });
+
+    if (receiptsError) {
+      return { data: null, error: receiptsError };
+    }
+
+    return { data: receipts, error: null };
+  },
+
+  // Get detailed breakdown of balances with a specific user
+  getBalanceWithUser: async (
+    currentUserId: string,
+    otherUserId: string
+  ): Promise<ServiceResponse<any[]>> => {
+    // Get all receipts involving both users
+    const { data, error } = await supabase
+      .from('receipts')
+      .select(`
+        id,
+        uploaded_by,
+        total_amount,
+        tax,
+        tip,
+        scan_date,
+        receipt_items (
+          id,
+          description,
+          price,
+          item_splits!inner (
+            user_id,
+            percentage,
+            amount_owed,
+            status
+          )
+        )
+      `)
+      .or(`uploaded_by.eq.${currentUserId},uploaded_by.eq.${otherUserId}`)
+      .order('scan_date', { ascending: false });
+
+    if (error) {
+      return { data: null, error };
+    }
+
+    // Filter to only receipts where both users have splits
+    const relevantReceipts = data?.filter(receipt => {
+      const splits = receipt.receipt_items?.flatMap(item => item.item_splits || []);
+      const hasCurrentUser = splits?.some(s => s.user_id === currentUserId);
+      const hasOtherUser = splits?.some(s => s.user_id === otherUserId);
+      return hasCurrentUser && hasOtherUser;
+    });
+
+    return { data: relevantReceipts || [], error: null };
+  },
+
+  // Mark a split as paid
+  markSplitPaid: async (splitId: string): Promise<ServiceResponse<any>> => {
+    const { data, error } = await supabase
+      .from('item_splits')
+      .update({ status: 'paid' })
+      .eq('id', splitId)
+      .select();
+
+    return { data, error };
+  },
+
+  // Get all pending splits for a user
+  getPendingSplits: async (userId: string): Promise<ServiceResponse<any[]>> => {
+    const { data, error } = await supabase
+      .from('item_splits')
+      .select(`
+        id,
+        percentage,
+        amount_owed,
+        status,
+        created_at,
+        receipt_items (
+          id,
+          description,
+          price,
+          receipt_id,
+          receipts (
+            id,
+            uploaded_by,
+            total_amount,
+            tax,
+            tip,
+            scan_date,
+            users!receipts_uploaded_by_fkey (
+              id,
+              username,
+              email
+            )
+          )
+        )
+      `)
+      .eq('user_id', userId)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false });
+
+    return { data, error };
+  },
+
+  // Friend system operations
+  sendFriendRequest: async (
+    fromUserId: string,
+    toEmail: string,
+    sphereLayer: 'core' | 'inner' | 'outer'
+  ): Promise<ServiceResponse<any>> => {
+    console.log('Sending friend request from:', fromUserId, 'to email:', toEmail);
+    
+    // Find user by email
+    const { data: toUser, error: userError } = await supabase
+      .from('users')
+      .select('id, username, email')
+      .eq('email', toEmail.toLowerCase().trim())
+      .single();
+
+    console.log('User lookup result:', { toUser, userError });
+
+    if (userError || !toUser) {
+      console.error('User not found:', userError);
+      return { data: null, error: new Error('User not found with that email. Make sure they have an account.') };
+    }
+
+    if (toUser.id === fromUserId) {
+      return { data: null, error: new Error('You cannot add yourself as a friend') };
+    }
+
+    // Check if already friends
+    const { data: existing } = await supabase
+      .from('friendships')
+      .select('id')
+      .eq('user_id', fromUserId)
+      .eq('friend_id', toUser.id)
+      .maybeSingle();
+
+    console.log('Existing friendship check:', existing);
+
+    if (existing) {
+      return { data: null, error: new Error('Already friends with this user') };
+    }
+
+    // Clean up old friend requests between these users
+    console.log('Cleaning up old requests...');
+    const { error: cleanupError } = await supabase.rpc('cleanup_old_friend_requests', {
+      user_a: fromUserId,
+      user_b: toUser.id,
+    });
+
+    if (cleanupError) {
+      console.error('Error cleaning up old requests:', cleanupError);
+    }
+
+    // Send friend request
+    const { data, error } = await supabase
+      .from('friend_requests')
+      .insert({
+        from_user_id: fromUserId,
+        to_user_id: toUser.id,
+        sphere_layer: sphereLayer,
+        status: 'pending',
+      })
+      .select()
+      .single();
+
+    console.log('Friend request creation result:', { data, error });
+
+    if (error) {
+      console.error('Error creating friend request:', error);
+    }
+
+    return { data, error };
+  },
+
+  getPendingFriendRequests: async (userId: string): Promise<ServiceResponse<any[]>> => {
+    console.log('Fetching pending requests for user:', userId);
+    
+    const { data, error } = await supabase
+      .from('friend_requests')
+      .select(`
+        id,
+        sphere_layer,
+        created_at,
+        status,
+        from_user_id,
+        to_user_id
+      `)
+      .eq('to_user_id', userId)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false });
+
+    console.log('Pending requests raw result:', { data, error });
+
+    if (error) {
+      console.error('Error fetching requests:', error);
+      return { data: null, error };
+    }
+
+    // Fetch user details for each request and filter out current friends
+    if (data && data.length > 0) {
+      const requestsWithUsers = await Promise.all(
+        data.map(async (request) => {
+          // Check if friendship already exists
+          const { data: existingFriendship } = await supabase
+            .from('friendships')
+            .select('id')
+            .eq('user_id', userId)
+            .eq('friend_id', request.from_user_id)
+            .maybeSingle();
+
+          // Skip this request if friendship already exists
+          if (existingFriendship) {
+            return null;
+          }
+
+          const { data: fromUser } = await supabase
+            .from('users')
+            .select('id, username, email')
+            .eq('id', request.from_user_id)
+            .single();
+
+          return {
+            ...request,
+            from_user: fromUser,
+          };
+        })
+      );
+      
+      // Filter out null values (current friends)
+      const validRequests = requestsWithUsers.filter(req => req !== null);
+      console.log('Valid requests with user details:', validRequests);
+      return { data: validRequests, error: null };
+    }
+
+    return { data: data || [], error: null };
+  },
+
+  acceptFriendRequest: async (requestId: string): Promise<ServiceResponse<any>> => {
+    const { data, error } = await supabase.rpc('accept_friend_request', {
+      request_id: requestId,
+    });
+
+    return { data, error };
+  },
+
+  rejectFriendRequest: async (requestId: string): Promise<ServiceResponse<any>> => {
+    const { data, error } = await supabase
+      .from('friend_requests')
+      .update({ status: 'rejected', updated_at: new Date().toISOString() })
+      .eq('id', requestId);
+
+    return { data, error };
+  },
+
+  getFriendsByLayer: async (
+    userId: string,
+    sphereLayer: 'core' | 'inner' | 'outer'
+  ): Promise<ServiceResponse<any[]>> => {
+    const { data, error } = await supabase
+      .from('friendships')
+      .select(`
+        id,
+        friend:users!friendships_friend_id_fkey(id, username, email)
+      `)
+      .eq('user_id', userId)
+      .eq('sphere_layer', sphereLayer);
+
+    return { data, error };
+  },
+
+  removeFriend: async (userId: string, friendId: string): Promise<ServiceResponse<any>> => {
+    // Remove both directions of friendship
+    const { error: error1 } = await supabase
+      .from('friendships')
+      .delete()
+      .eq('user_id', userId)
+      .eq('friend_id', friendId);
+
+    const { error: error2 } = await supabase
+      .from('friendships')
+      .delete()
+      .eq('user_id', friendId)
+      .eq('friend_id', userId);
+
+    // Clean up any friend requests between users
+    const { error: cleanupError } = await supabase.rpc('cleanup_old_friend_requests', {
+      user_a: userId,
+      user_b: friendId,
+    });
+
+    if (cleanupError) {
+      console.error('Error cleaning up friend requests:', cleanupError);
+    }
+
+    return { data: null, error: error1 || error2 || cleanupError };
+  },
+
+  createExpense: async ({
+    uploadedBy,
+    totalAmount,
+    tax,
+    tip,
+    sphereLayer,
+    participants
+  }: {
+    uploadedBy: string;
+    totalAmount: number;
+    tax: number;
+    tip: number;
+    sphereLayer: 'core' | 'inner' | 'outer';
+    participants: string[]; // friend user IDs
+  }) => {
+    try {
+      // Create receipt
+      const { data: receipt, error: recErr } = await supabase
+        .from('receipts')
+        .insert({
+          uploaded_by: uploadedBy,
+          total_amount: totalAmount,
+          tax,
+          tip,
+          status: 'completed'
+        })
+        .select()
+        .single();
+
+      if (recErr) throw recErr;
+
+      // Add single item representing the entire bill
+      const { data: items, error: itemErr } = await supabase
+        .from('receipt_items')
+        .insert({
+          receipt_id: receipt.id,
+          description: 'Shared expense',
+          price: totalAmount
+        })
+        .select();
+
+      if (itemErr) throw itemErr;
+
+      const itemId = items[0].id;
+
+      // Create splits
+      const perPerson = totalAmount / (participants.length + 1);
+
+      const splits = [
+        { item_id: itemId, user_id: uploadedBy, percentage: 100, amount_owed: 0, status: 'paid' },
+        ...participants.map(uid => ({
+          item_id: itemId,
+          user_id: uid,
+          percentage: 100 / participants.length,
+          amount_owed: perPerson,
+          status: 'pending'
+        }))
+      ];
+
+      const { data: splitData, error: splitErr } = await supabase
+        .from('item_splits')
+        .insert(splits)
+        .select();
+
+      if (splitErr) throw splitErr;
+
+      return { data: { receipt, items, splits: splitData }, error: null };
+    } catch (e) {
+      return { data: null, error: e };
+    }
+  }
+
+};
